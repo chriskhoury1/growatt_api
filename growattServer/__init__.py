@@ -7,6 +7,11 @@ import json
 import requests
 import warnings
 from random import randint
+from bs4 import BeautifulSoup
+import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
+
+
 
 def hash_password(password):
     """
@@ -24,7 +29,7 @@ class Timespan(IntEnum):
     month = 2
 
 class GrowattApi:
-    server_url = 'https://test.growatt.com/'
+    server_url = 'http://server.growatt.com/'
     agent_identifier = "Dalvik/2.1.0 (Linux; U; Android 12; https://github.com/indykoning/PyPi_GrowattServer)"
 
     def __init__(self, add_random_user_id=False, agent_identifier=None):
@@ -37,12 +42,16 @@ class GrowattApi:
           self.agent_identifier += " - " + random_number
 
         self.session = requests.Session()
+        self.session.verify = False  # Disable SSL verification
         self.session.hooks = {
             'response': lambda response, *args, **kwargs: response.raise_for_status()
         }
-
-        headers = {'User-Agent': self.agent_identifier}
-        self.session.headers.update(headers)
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:100.0) Gecko/20100101 Firefox/100.0',
+            'Accept': '*/*',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive'
+        })
 
     def __get_date_string(self, timespan=None, date=None):
         if timespan is not None:
@@ -65,91 +74,367 @@ class GrowattApi:
         """
         return self.server_url + page
 
-    def login(self, username, password, is_password_hashed=False):
-        """
-        Log the user in.
 
-        Returns
-        'data' -- A List containing Objects containing the folowing
-            'plantName' -- Friendly name of the plant
-            'plantId'   -- The ID of the plant
-        'service'
-        'quality'
-        'isOpenSmartFamily'
-        'totalData' -- An Object
-        'success'   -- True or False
-        'msg'
-        'app_code'
-        'user' -- An Object containing a lot of user information
-            'uid'
-            'userLanguage'
-            'inverterGroup' -- A List
-            'timeZone' -- A Number
-            'lat'
-            'lng'
-            'dataAcqList' -- A List
-            'type'
-            'accountName' -- The username
-            'password' -- The password hash of the user
-            'isValiPhone'
-            'kind'
-            'mailNotice' -- True or False
-            'id'
-            'lasLoginIp'
-            'lastLoginTime'
-            'userDeviceType'
-            'phoneNum'
-            'approved' -- True or False
-            'area' -- Continent of the user
-            'smsNotice' -- True or False
-            'isAgent'
-            'token'
-            'nickName'
-            'parentUserId'
-            'customerCode'
-            'country'
-            'isPhoneNumReg'
-            'createDate'
-            'rightlevel'
-            'appType'
-            'serverUrl'
-            'roleId'
-            'enabled' -- True or False
-            'agentCode'
-            'inverterList' -- A list
-            'email'
-            'company'
-            'activeName'
-            'codeIndex'
-            'appAlias'
-            'isBigCustomer'
-            'noticeType'
-        """
-        if not is_password_hashed:
-            password = hash_password(password)
 
-        response = self.session.post(self.get_url('newTwoLoginAPI.do'), data={
-            'userName': username,
-            'password': password
-        }, verify=False)
-        data = json.loads(response.content.decode('utf-8'))['back']
-        if data['success']:
-            data.update({
-                'userId': data['user']['id'],
-                'userLevel': data['user']['rightlevel']
-            })
-        return data
-
-    def plant_list(self, user_id):
+    def login(self, username, password):
         """
-        Get a list of plants connected to this account.
+        Log the user in using the Growatt API.
         """
-        response = self.session.get(self.get_url('PlantListAPI.do'),
-                                    params={'userId': user_id},
-                                    allow_redirects=False)
+        # Hash the password using MD5
+        md5_hasher = hashlib.md5()
+        md5_hasher.update(password.encode('utf-8'))
+        hashed_password = md5_hasher.hexdigest()
 
-        data = json.loads(response.content.decode('utf-8'))
-        return data['back']
+        # Prepare the payload
+        payload = {
+            'account': username,
+            'password': '',
+            'validateCode': '',
+            'isReadPact': 0,
+            'passwordCrc': hashed_password
+        }
+
+        try:
+            # Send the POST request to the login URL
+            response = self.session.post(
+                url='http://server.growatt.com/login',
+                data=payload
+            )
+
+            # Check if the request was successful
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('result') == 1:
+                    print("Login successful.")
+                    print("Cookies after login:", self.session.cookies)
+                    return data
+                else:
+                    print("Login failed. Response:", data)
+                    return None
+            else:
+                print(f"Login failed with status code: {response.status_code}")
+                return None
+        except requests.exceptions.RequestException as e:
+            print(f"An error occurred during login: {e}")
+            return None
+
+
+    def get_plant_list(self):
+        """
+        Fetch the plant list using the Growatt API session.
+        [{"timezone":"2","id":"1602774","plantName":"Hady"}]
+        """
+        try:
+            # Use the same session to send the GET request
+            response = self.session.get(self.server_url + 'index/getPlantListTitle')
+            response.raise_for_status()  # Raise an error for HTTP response codes >= 400
+
+            # Parse and return the JSON response
+            plant_list = response.json()
+            print("Plant List:", plant_list)
+            return plant_list
+
+        except requests.exceptions.RequestException as e:
+            print(f"An error occurred while fetching the plant list: {e}")
+            return None
+        except json.JSONDecodeError as e:
+            print(f"Failed to decode JSON response: {e}")
+            return None
+
+
+    def get_weather_by_plant(self, plant_id):
+        """
+        Fetches weather information for a specific plant.
+        """
+        try:
+            response = self.session.get(self.server_url + (f'index/getWeatherByPlantId?plantId={plant_id}'))
+            response.raise_for_status()
+            data = response.json()
+            return data
+        except requests.RequestException as e:
+            print(f"An error occurred while fetching weather data: {e}")
+            return None
+
+    def get_devices_by_plant(self, plant_id):
+        """
+        Fetches a list of devices associated with a specific plant.
+        """
+        try:
+            response = self.session.post(self.server_url + (f'panel/getDevicesByPlant?plantId={plant_id}'))
+            response.raise_for_status()
+            data = response.json()
+            return data
+        except requests.RequestException as e:
+            print(f"An error occurred while fetching device list: {e}")
+            return None
+
+    def get_panel_data(self, plant_id):
+        """
+        Fetches panel data for a specific plant.
+        """
+        try:
+            response = self.session.post(self.server_url + (f'panel/getPlantData?plantId={plant_id}'))
+            response.raise_for_status()
+            data = response.json()
+            return data
+        except requests.RequestException as e:
+            print(f"An error occurred while fetching panel data: {e}")
+            return None
+
+    def get_storage_total_data(self, plant_id):
+        """
+        Fetches total storage data for a specific plant.
+        """
+        try:
+            response = self.session.post(self.server_url + (f'panel/storage/getStorageTotalData?plantId={plant_id}'))
+            response.raise_for_status()
+            data = response.json()
+            return data
+        except requests.RequestException as e:
+            print(f"An error occurred while fetching storage total data: {e}")
+            return None
+
+    def get_storage_status_data(self, plant_id):
+        """
+        Fetches storage status data for a specific plant.
+        """
+        try:
+            response = self.session.post(self.server_url + (f'panel/storage/getStorageStatusData?plantId={plant_id}'))
+            response.raise_for_status()
+            data = response.json()
+            return data
+        except requests.RequestException as e:
+            print(f"An error occurred while fetching storage status data: {e}")
+            return None
+    def get_panel_page_by_type(self, ttt):
+        """
+        Fetches panel page data by type.
+        """
+        try:
+            response = self.session.post(self.server_url + f'panel/getPanelPageByType?ttt={ttt}')
+            response.raise_for_status()
+            data = response.json()
+            return data
+        except requests.RequestException as e:
+            print(f"An error occurred while fetching panel page data: {e}")
+            return None
+
+    def get_storage_bat_chart(self, plant_id, device_sn):
+        """
+        Fetches storage battery chart data.
+        """
+        payload = {
+            "plantId": plant_id,
+            "storageSn": device_sn
+        }
+        try:
+            response = self.session.post(self.server_url + 'panel/storage/getStorageBatChart', payload)
+            response.raise_for_status()
+            data = response.json()
+            return data
+        except requests.RequestException as e:
+            print(f"An error occurred while fetching storage battery chart data: {e}")
+            return None
+
+    def get_storage_energy_day_chart(self, plant_id, device_sn, currentdate):
+        """
+        Fetches daily energy chart data for storage.
+        """
+        payload = {
+            "plantId": plant_id,
+            "storageSn": device_sn,
+            "date": currentdate
+        }
+        try:
+            response = self.session.post(self.server_url + 'panel/storage/getStorageEnergyDayChart', payload)
+            response.raise_for_status()
+            data = response.json()
+            return data
+        except requests.RequestException as e:
+            print(f"An error occurred while fetching storage energy day chart data: {e}")
+            return None
+        
+    def get_device_day_chart(self, plant_id, date, device_sn, param):
+        """
+        Fetch data for a specific parameter and generate a bar graph.
+
+        :param plant_id: ID of the plant.
+        :param date: Date in 'YYYY-MM-DD' format.
+        :param device_sn: Serial number of the device.
+        :param param: Parameter to query (e.g., "outPutPower").
+        """
+        url = self.server_url + "energy/compare/getDevicesDayChart"
+        payload = {
+            "plantId": plant_id,
+            "date": date,
+            "jsonData": json.dumps([{"type": "storage", "sn": device_sn, "params": param}])
+        }
+
+        try:
+            response = self.session.post(url, data=payload)
+            response.raise_for_status()
+
+            data = response.json()
+            if data.get("result") == 1:
+                chart_data = data.get("obj", {}).get("chart", [])
+                current_value = chart_data[-1] if chart_data else None
+                self.plot_bar_graph(chart_data, param)
+                print(f"Current Value for {param}: {current_value}")
+                return chart_data, current_value
+            else:
+                print(f"Error fetching data: {data.get('msg', 'Unknown error')}")
+                return None, None
+
+        except requests.RequestException as e:
+            print(f"An error occurred while fetching device data: {e}")
+            return None, None
+        
+    def get_chart(self, plant_id, date, device_sn, params, scale):
+        """
+        Fetches chart data for specific parameters and scale.
+
+        :param plant_id: The plant ID.
+        :param date: The date or time period for the query.
+        :param device_sn: The device serial number.
+        :param params: Comma-separated string of parameters (e.g., "pBat,pAcInPut,outPutPower").
+        :param scale: The time scale ("Day", "Month", "Year", "Total").
+        :return: A dictionary containing parameter data.
+        """
+        scale_to_url = {
+            "Day": "energy/compare/getDevicesDayChart",
+            "Month": "energy/compare/getDevicesMonthChart",
+            "Year": "energy/compare/getDevicesYearChart",
+            "Total": "energy/compare/getDevicesTotalChart",
+        }
+
+        url = self.server_url + scale_to_url[scale]
+
+        # Prepare the payload
+        payload = {
+            "plantId": plant_id,
+            "jsonData": json.dumps([{"type": "storage", "sn": device_sn, "params": params}])
+        }
+
+        # Add "date" or "year" depending on the scale
+        if scale in ["Day", "Month"]:
+            payload["date"] = date  # Use "date" key for day or month scales
+        elif scale in ["Year", "Total"]:
+            payload["year"] = date  # Use "year" key for year or total scales
+
+        try:
+            response = self.session.post(url, data=payload)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("result") == 1 and data.get("obj"):
+                return data["obj"][0]["datas"]
+            else:
+                print(f"Failed to fetch data for {params} ({scale}): {data.get('msg', 'Unknown error')}")
+                return {}
+        except requests.RequestException as e:
+            print(f"An error occurred while fetching data for {params} ({scale}): {e}")
+            return {}
+
+    def generate_time_labels(self, scale, date):
+        """
+        Generate accurate time labels based on the scale and date.
+
+        :param scale: The time scale ("Day", "Month", "Year", "Total").
+        :param date: The date or time period for the query.
+        :return: A list of time labels.
+        """
+        if scale == "Day":
+            start_time = datetime.strptime(date, "%Y-%m-%d")
+            labels = [(start_time + timedelta(minutes=5 * i)).strftime("%H:%M") for i in range(288)]  # 288 slots (5-min intervals)
+        elif scale == "Month":
+            start_time = datetime.strptime(date, "%Y-%m")
+            num_days = (start_time.replace(month=start_time.month % 12 + 1, day=1) - timedelta(days=1)).day
+            labels = [f"{start_time.year}-{start_time.month:02d}-{day:02d}" for day in range(1, num_days + 1)]
+        elif scale == "Year":
+            labels = [f"{month:02d}" for month in range(1, 13)]  # 12 months
+        elif scale == "Total":
+            current_year = datetime.now().year
+            labels = [str(year) for year in range(current_year - len(labels) + 1, current_year + 1)]
+        else:
+            labels = []
+        return labels
+    
+    def truncate_to_current_time(self, labels, values, scale):
+        """
+        Truncate labels and values to ensure they don't exceed the current datetime.
+
+        :param labels: List of time labels.
+        :param values: List of values corresponding to the labels.
+        :param scale: The time scale ("Day", "Month", "Year", "Total").
+        :return: Truncated labels and values.
+        """
+        current_datetime = datetime.now()
+        truncated_labels = []
+        truncated_values = []
+
+        if scale == "Day":
+            for label, value in zip(labels, values):
+                if datetime.strptime(label, "%H:%M") <= current_datetime:
+                    truncated_labels.append(label)
+                    truncated_values.append(value)
+        elif scale == "Month":
+            for label, value in zip(labels, values):
+                if datetime.strptime(label, "%Y-%m-%d").date() <= current_datetime.date():
+                    truncated_labels.append(label)
+                    truncated_values.append(value)
+        elif scale == "Year":
+            for label, value in zip(labels, values):
+                if int(label) <= current_datetime.year:
+                    truncated_labels.append(label)
+                    truncated_values.append(value)
+        elif scale == "Total":
+            truncated_labels = labels  # Total is historical data and doesn't depend on the current date.
+            truncated_values = values
+
+        return truncated_labels, truncated_values
+
+    def plot_parameters(self, plant_id, date, device_sn, params, scale="Day"):
+        """
+        Plots the chart for multiple parameters over a given scale.
+
+        :param plant_id: The plant ID.
+        :param date: The date or time period for the query.
+        :param device_sn: The device serial number.
+        :param params: Comma-separated string of parameters (e.g., "pBat,pAcInPut,outPutPower").
+        :param scale: The time scale ("Day", "Month", "Year", "Total").
+        """
+        data = self.get_chart(plant_id, date, device_sn, params, scale)
+        if not data:
+            print(f"No data available for {params} ({scale})")
+            return
+
+        time_labels = self.generate_time_labels(scale, date)
+
+        # Plot each parameter
+        plt.figure(figsize=(14, 8))
+        for param, values in data.items():
+            # Truncate data and labels to the current time
+            truncated_labels, truncated_values = self.truncate_to_current_time(time_labels, values, scale)
+
+            # Filter out None values
+            filtered_data = [(i, val) for i, val in enumerate(truncated_values) if val is not None]
+            if not filtered_data:
+                print(f"No valid data points for {param} ({scale})")
+                continue
+
+            indices, values = zip(*filtered_data)
+            plt.plot(indices, values, marker='o', label=f"{param} ({scale})")
+
+        # Formatting the plot
+        plt.title(f"Parameters Over {scale} on {date}")
+        plt.xlabel("Time Slots")
+        plt.ylabel("Value")
+        plt.xticks(
+            range(len(truncated_labels)), truncated_labels, rotation=45, ha="right", fontsize=8
+        )
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
 
     def plant_detail(self, plant_id, timespan, date=None):
         """
